@@ -121,37 +121,106 @@ class LyricProcessor:
         if not params_str:
             return ""
         
-        # 使用更智能的方法：从右往左查找，找到第三个逗号分隔的参数
-        # 但更简单的方法是：使用正则表达式匹配引号字符串，考虑转义
-        
-        # 方法：匹配引号字符串（支持单引号和双引号，考虑转义）
-        # 正则表达式：匹配 '...' 或 "..."，其中引号内的引号需要转义（两个连续引号）
-        quote_pattern = r"(?:'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\")"
-        matches = re.findall(quote_pattern, params_str)
-        
-        # 如果找到至少3个参数，返回第三个
-        if len(matches) >= 3:
-            third_param = matches[2]
+        # 新策略：
+        # 1. 从左往右解析前两个参数（时间戳，格式简单且不含引号）
+        # 2. 剩余部分是 '歌词', '编号'
+        # 3. 找到最后一个参数（编号），剩余的就是歌词
+        try:
+            # 从左往右找前两个"在引号外"的逗号
+            # 时间戳格式简单，不会有内嵌引号的问题
+            commas_outside_quotes = []
+            i = 0
+            in_quotes = False
+            quote_char = None
+            
+            while i < len(params_str):
+                char = params_str[i]
+                
+                if char in ["'", '"']:
+                    if not in_quotes:
+                        # 进入引号
+                        in_quotes = True
+                        quote_char = char
+                    elif char == quote_char:
+                        # 可能退出引号，或者是转义的引号
+                        if i + 1 < len(params_str) and params_str[i + 1] == quote_char:
+                            # 这是转义的引号，跳过下一个字符
+                            i += 1
+                        else:
+                            # 退出引号
+                            in_quotes = False
+                            quote_char = None
+                elif char == ',' and not in_quotes:
+                    # 这是一个在引号外的逗号
+                    commas_outside_quotes.append(i)
+                    # 我们只需要前两个逗号
+                    if len(commas_outside_quotes) >= 2:
+                        break
+                
+                i += 1
+            
+            # 现在我们有了前两个逗号的位置
+            # 第一个逗号分隔时间1和时间2
+            # 第二个逗号分隔时间2和歌词
+            if len(commas_outside_quotes) < 2:
+                return self._extract_third_param_fallback(params_str)
+            
+            # 从第二个逗号之后开始，剩余部分是: '歌词', '编号'
+            remaining = params_str[commas_outside_quotes[1] + 1:].strip()
+            
+            # 现在我们需要分离歌词和编号
+            # 从右往左找最后一个参数（编号）
+            # 编号的格式是 '数字'，很简单
+            
+            # 找到最后一个引号（编号的结束）
+            last_quote_pos = max(remaining.rfind("'"), remaining.rfind('"'))
+            if last_quote_pos == -1:
+                return self._extract_third_param_fallback(params_str)
+            
+            quote_char = remaining[last_quote_pos]
+            
+            # 找到与之配对的开始引号
+            # 从 last_quote_pos-1 往左找
+            number_start_quote = remaining.rfind(quote_char, 0, last_quote_pos)
+            if number_start_quote == -1:
+                return self._extract_third_param_fallback(params_str)
+            
+            # 现在 number_start_quote 到 last_quote_pos 之间是编号参数
+            # 找到编号参数之前的逗号
+            comma_before_number = remaining.rfind(',', 0, number_start_quote)
+            if comma_before_number == -1:
+                return self._extract_third_param_fallback(params_str)
+            
+            # 提取歌词部分（从开始到这个逗号）
+            lyric_param = remaining[:comma_before_number].strip()
+            
             # 去除外层引号
-            if third_param.startswith("'") and third_param.endswith("'"):
-                result = third_param[1:-1]
-                # 处理转义的引号：两个连续的单引号变成一个单引号
-                result = result.replace("''", "'")
-                return result
-            elif third_param.startswith('"') and third_param.endswith('"'):
-                result = third_param[1:-1]
-                # 处理转义的引号：两个连续的双引号变成一个双引号
-                result = result.replace('""', '"')
-                return result
-        
-        # 如果正则匹配失败，使用备用方法：手动解析
-        # 这种情况通常发生在字符串格式不正确时
-        return self._extract_third_param_fallback(params_str)
+            if len(lyric_param) >= 2:
+                if (lyric_param.startswith("'") and lyric_param.endswith("'")) or \
+                   (lyric_param.startswith('"') and lyric_param.endswith('"')):
+                    lyric_text = lyric_param[1:-1]
+                    # 处理转义的引号
+                    if lyric_param[0] == "'":
+                        lyric_text = lyric_text.replace("''", "'")
+                    else:
+                        lyric_text = lyric_text.replace('""', '"')
+                    return lyric_text
+            
+            return lyric_param
+            
+        except Exception:
+            # 如果解析失败，使用备用方法
+            return self._extract_third_param_fallback(params_str)
     
     def _extract_third_param_fallback(self, params_str: str) -> str:
         """
         备用方法：手动解析参数（当正则表达式失败时使用）
         尝试找到第三个逗号分隔的参数
+        
+        这个方法使用状态机来解析参数，能够正确处理：
+        1. 引号内的逗号（不作为分隔符）
+        2. 转义的引号（两个连续的相同引号，如 '' 或 ""）
+        3. 混合的引号类型
         """
         # 简单方法：按逗号分割，但需要智能处理引号内的逗号
         params = []
@@ -163,39 +232,49 @@ class LyricProcessor:
         while i < len(params_str):
             char = params_str[i]
             
-            if char in ['"', "'"] and (i == 0 or params_str[i-1] != '\\'):
+            if char in ['"', "'"]:
                 if not in_quotes:
+                    # 进入引号
                     in_quotes = True
                     quote_char = char
                     current_param += char
                 elif char == quote_char:
-                    # 检查是否是转义的引号
+                    # 可能退出引号，或者是转义的引号
+                    # 检查下一个字符是否是相同的引号（转义）
                     if i + 1 < len(params_str) and params_str[i + 1] == quote_char:
+                        # 这是转义的引号，保留两个引号
                         current_param += char + char
-                        i += 1
+                        i += 1  # 跳过下一个引号
                     else:
+                        # 这是引号的结束
                         current_param += char
                         in_quotes = False
                         quote_char = None
                 else:
+                    # 在引号内，但是遇到了不同类型的引号，直接添加
                     current_param += char
             elif char == ',' and not in_quotes:
+                # 这是参数分隔符
                 params.append(current_param.strip())
                 current_param = ""
             else:
+                # 普通字符
                 current_param += char
             
             i += 1
         
+        # 添加最后一个参数
         if current_param.strip():
             params.append(current_param.strip())
         
+        # 提取第三个参数
         if len(params) >= 3:
             third = params[2].strip()
-            # 去除引号
+            # 去除外层引号
             if (third.startswith("'") and third.endswith("'")) or \
                (third.startswith('"') and third.endswith('"')):
                 third = third[1:-1]
+                # 处理转义的引号：两个连续的相同引号变成一个引号
                 third = third.replace("''", "'").replace('""', '"')
             return third
         
